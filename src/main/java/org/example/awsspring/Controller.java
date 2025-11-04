@@ -11,4 +11,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api")
 public class Controller {
 
+    @GetMapping("/hey")
+    public String hello() {
+        return "hey from AWS Cloud!";
+    }
+
 }
