@@ -1,0 +1,56 @@
+name: Build & Deploy Spring Boot to EC2 via SSM
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build JAR
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean bootJar
+          ls -l build/libs
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload JAR to S3
+        id: upload
+        run: |
+          ARTIFACT=$(ls build/libs/*.jar | head -n1)
+          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
+          aws s3 cp "$ARTIFACT" "s3://${{ secrets.S3_BUCKET }}/spring/app.jar" --only-show-errors
+
+      - name: Deploy on EC2 via SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy Spring Boot from GitHub Actions" \
+            --parameters commands="[
+              \"set -e\",
+              \"sudo aws s3 cp s3://${{ secrets.S3_BUCKET }}/spring/app.jar /opt/spring/app.jar\",
+              \"sudo chown ec2-user:ec2-user /opt/spring/app.jar\",
+              \"sudo systemctl daemon-reload\",
+              \"sudo systemctl restart spring-app\",
+              \"sudo systemctl status spring-app --no-pager -l || true\"
+            ]" \
+            --output text
