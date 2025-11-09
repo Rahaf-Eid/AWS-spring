@@ -2,8 +2,12 @@ name: Build & Deploy Spring Boot to EC2 via SSM
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }} # set this secret to "aws-spring" (or hardcode)
 
 jobs:
   build-and-deploy:
@@ -19,7 +23,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Build JAR
+      - name: Build JAR (for Dockerfile COPY)
         run: |
           chmod +x ./gradlew
           ./gradlew clean bootJar
@@ -28,38 +32,44 @@ jobs:
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: ecr
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker image
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          # uses your Dockerfile that copies build/libs/*.jar
-          docker build -t ${{ secrets.ECR_REPOSITORY }}:latest .
+          # Sanity checks to avoid empty tags
+          test -n "$ECR_REPOSITORY" || (echo "ECR_REPOSITORY is empty. Set repo secret to e.g. 'aws-spring'." && exit 1)
+          test -n "$ECR_REGISTRY"   || (echo "ECR login failed (no registry). Check AWS creds/region." && exit 1)
 
-      - name: Tag & Push image
-        run: |
-          REG="${{ steps.ecr.outputs.registry }}"
-          docker tag ${{ secrets.ECR_REPOSITORY }}:latest $REG/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
-          docker tag ${{ secrets.ECR_REPOSITORY }}:latest $REG/${{ secrets.ECR_REPOSITORY }}:latest
-          docker push $REG/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
-          docker push $REG/${{ secrets.ECR_REPOSITORY }}:latest
+          echo "Building image $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "Pushing to ECR…"
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
       - name: Deploy via SSM (pull & restart)
         env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
         run: |
-          IMAGE_URI="${REGISTRY}/${{ secrets.ECR_REPOSITORY }}:${GITHUB_SHA}"
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters commands="[
               \"set -e\",
-              \"aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY\",
               \"echo IMAGE_URI=$IMAGE_URI | sudo tee /etc/sysconfig/app-image > /dev/null\",
               \"sudo systemctl daemon-reload\",
               \"sudo systemctl restart app\",
