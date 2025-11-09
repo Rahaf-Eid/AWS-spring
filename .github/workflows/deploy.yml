@@ -32,25 +32,37 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload JAR to S3
-        id: upload
-        run: |
-          ARTIFACT=$(ls build/libs/*.jar | head -n1)
-          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
-          aws s3 cp "$ARTIFACT" "s3://${{ secrets.S3_BUCKET }}/spring/app.jar" --only-show-errors
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Deploy on EC2 via SSM
+      - name: Build Docker image
         run: |
+          # uses your Dockerfile that copies build/libs/*.jar
+          docker build -t ${{ secrets.ECR_REPOSITORY }}:latest .
+
+      - name: Tag & Push image
+        run: |
+          REG="${{ steps.ecr.outputs.registry }}"
+          docker tag ${{ secrets.ECR_REPOSITORY }}:latest $REG/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+          docker tag ${{ secrets.ECR_REPOSITORY }}:latest $REG/${{ secrets.ECR_REPOSITORY }}:latest
+          docker push $REG/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push $REG/${{ secrets.ECR_REPOSITORY }}:latest
+
+      - name: Deploy via SSM (pull & restart)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE_URI="${REGISTRY}/${{ secrets.ECR_REPOSITORY }}:${GITHUB_SHA}"
           aws ssm send-command \
             --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy Spring Boot from GitHub Actions" \
             --parameters commands="[
               \"set -e\",
-              \"sudo aws s3 cp s3://${{ secrets.S3_BUCKET }}/spring/app.jar /opt/spring/app.jar\",
-              \"sudo chown ec2-user:ec2-user /opt/spring/app.jar\",
+              \"aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY\",
+              \"echo IMAGE_URI=$IMAGE_URI | sudo tee /etc/sysconfig/app-image > /dev/null\",
               \"sudo systemctl daemon-reload\",
-              \"sudo systemctl restart spring-app\",
-              \"sudo systemctl status spring-app --no-pager -l || true\"
+              \"sudo systemctl restart app\",
+              \"sudo systemctl status app --no-pager -l || true\"
             ]" \
             --output text
