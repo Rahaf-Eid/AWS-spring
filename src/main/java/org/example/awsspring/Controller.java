@@ -13,7 +13,7 @@ public class Controller {
 
     @GetMapping("/hey")
     public String hello() {
-        return "hey from AWS Cloud!";
+        return "Hi there! Rahaf’s app just deployed to AWS Cloud ☁️✨";
     }
 
 }
